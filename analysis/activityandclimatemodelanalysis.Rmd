@@ -1,0 +1,558 @@
+---
+title: "activityandclimatemodelanalysis"
+author: "Keely Maynard"
+date: "2025-04-25"
+output: html_document
+---
+## Introduction
+
+This document provides the workflow used to analyze the activity in Bengal slow lorises across hot, dry, and wet seasons. 
+The code starts from cleaned (centered predictors, interaction terms, and zone IDs created in ArcGIS Pro) and analysis ready seasonal data files: 
+- dry_data.csv
+- hot_data.csv
+- wet_data.csv
+
+These files contain: 
+- behavioral category ('beh2')
+- individual identifier ('id')
+- spatial zone identifiers at 100 m, 200 m, and 300 m scales ('zoneid_100m', 'zoneid_200m', zoneid_300m')
+- centered climate predictors ('temp_c', 'Rh_c')
+- the interaction between temperature and relative humidity (temp_Rh_c)
+- loris height in meters ('animal_height.m')
+- time of observation ('time')
+
+These datafiles are avaliable in the GitHub repository associated with this manuscript.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#libraries for whole document
+library(lubridate)
+library(stringr)
+library(brms)
+library(loo)
+library(bayestestR)
+library(tidyverse)
+library(cowplot)
+library(posterior)
+library(ggtext)
+library(tidybayes)
+library(tidyverse)
+```
+
+## Data Import
+
+```{r Data_Import}
+
+hot_data <- read.csv("hot_data.csv")
+dry_data <- read.csv("dry_data.csv")
+wet_data <- read.csv('wet_data.csv')
+```
+## Data Cleaning
+
+```{r Data_Cleaning}
+#make sure that all characters that are factors are set as factors
+
+hot_data$beh2 <- as.factor(hot_data$beh2) #behavior (4 levels)
+dry_data$beh2 <- as.factor(dry_data$beh2)
+wet_data$beh2 <- as.factor(wet_data$beh2)
+
+hot_data$id <- as.factor(hot_data$id) #individual id
+dry_data$id <- as.factor(dry_data$id)
+wet_data$id <- as.factor(wet_data$id)
+
+hot_data$zone_id_100 <- as.factor(hot_data$zone_id_100) #zone id (100m)
+dry_data$zoneid_100m <- as.factor(dry_data$zoneid_100m)
+wet_data$zoneid_100m <- as.factor(wet_data$zoneid_100m)
+
+hot_data$zone_id_200m <- as.factor(hot_data$zone_id_200m) #zone id (200m)
+dry_data$zoneid_200m <- as.factor(dry_data$zoneid_200m)
+wet_data$zoneid_200m <- as.factor(wet_data$zoneid_200m)
+
+hot_data$zone_id_300 <- as.factor(hot_data$zone_id_300) #zone id (300m)
+dry_data$zoneid_300m <- as.factor(dry_data$zoneid_300m)
+wet_data$zoneid_300m <- as.factor(wet_data$zoneid_300m)
+
+
+#set resting as the reference variable
+dry_data$beh2 <- relevel(dry_data$beh2, ref = "re")
+hot_data$beh2 <- relevel(hot_data$beh2, ref = "re")
+wet_data$beh2 <- relevel(wet_data$beh2, ref = "re")
+```
+## Time Processing 
+
+Calculate time in minutes from 19:00:00 (start of the observation period). The slow loris active period crosses over midnight and so we needed to create a reference time for start of night so that our time reflected a nocturnal activity pattern. 
+```{r Time_Processing}
+
+#create a reference time for the start of a night
+night_start <- hms("19:00:00")
+
+#add seconds to any time periods that are missing seconds
+wet_data$time_clean <- ifelse(
+  str_detect(wet_data$Time, "^\\d{1,2}:\\d{2}$"),
+  paste0(wet_data$Time, ":00"),
+  wet_data$Time
+)
+
+dry_data$time_clean <- ifelse(
+  str_detect(dry_data$Time, "^\\d{1,2}:\\d{2}$"),
+  paste0(dry_data$Time, ":00"),
+  dry_data$Time
+)
+
+hot_data$time_clean <- ifelse(
+  str_detect(hot_data$Time, "^\\d{1,2}:\\d{2}$"),
+  paste0(hot_data$Time, ":00"),
+  hot_data$Time
+)
+
+# Parse the time correctly
+dry_data$time_clean <- hms(dry_data$time_clean)
+hot_data$time_clean <- hms(hot_data$time_clean)
+wet_data$time_clean <- hms(wet_data$time_clean)
+
+#How many minutes since the set night start
+dry_data$time_minutes <- as.numeric(dry_data$time_clean - night_start) / 60
+wet_data$time_minutes <- as.numeric(wet_data$time_clean - night_start) / 60
+hot_data$time_minutes <- as.numeric(hot_data$time_clean - night_start) / 60
+
+#for any times that come after midnight we need to handle the negative values
+dry_data$time_minutes <- ifelse(
+  dry_data$time_minutes < 0,
+  dry_data$time_minutes + 1440,
+  dry_data$time_minutes
+)
+
+hot_data$time_minutes <- ifelse(
+  hot_data$time_minutes < 0,
+  hot_data$time_minutes + 1440,
+  hot_data$time_minutes
+)
+
+wet_data$time_minutes <- ifelse(
+  wet_data$time_minutes < 0,
+  wet_data$time_minutes + 1440,
+  wet_data$time_minutes
+)
+
+
+```
+## Modeling 
+##Dry Season
+```{r Dry_Season}
+
+# 100m zone
+dry_model_100 <- brm(
+  beh2 ~ temp_c + temp_Rh_c + Rh_c + animal_height.m. + time_minutes + 
+    (1 | zoneid_100m) + (1 | id), #these are the random effects 
+  data = dry_data,
+  family = categorical(),
+  chains = 4,  #this is the recommended number from the package handbook 
+  cores = 4,
+  iter = 4000, #for stability
+  control = list(adapt_delta = 0.99), # tighter adaptation (forces the model to be more careful),
+  save_pars = save_pars(all = TRUE) #save all intermediate posterior draws so we can use moment matching later
+)
+
+pairs(dry_model_100) #let's you see if the parameters are correlated
+
+summary(dry_model_100)
+
+# 200m zone
+
+dry_model_200 <- brm(
+  beh2 ~ temp_c + temp_Rh_c + Rh_c + animal_height.m. + time_minutes + 
+    (1 | zoneid_200m) + (1 | id), #these are the random effects 
+  data = dry_data,
+  family = categorical(),
+  chains = 4,  #this is the recommended number from the package handbook 
+  cores = 4,
+  iter = 4000, #for stability
+  control = list(adapt_delta = 0.99, max_treedepth = 15), # tighter adaptation (forces the model to be more careful)
+  save_pars = save_pars(all = TRUE)
+)
+
+pairs(dry_model_200) #let's you see if the parameters are correlated
+
+summary(dry_model_200)
+
+# 300m zone
+
+dry_model_300 <- brm(
+  beh2 ~ temp_c + temp_Rh_c + Rh_c + animal_height.m. + time_minutes + 
+    (1 | zoneid_300m) + (1 | id), #these are the random effects 
+  data = dry_data,
+  family = categorical(),
+  chains = 4,  #this is the recommended number from the package handbook 
+  cores = 4,
+  iter = 4000, #for stability
+  control = list(adapt_delta = 0.99, max_treedepth = 15), # tighter adaptation (forces the model to be more careful)
+  save_pars = save_pars(all = TRUE)
+)
+
+pairs(dry_model_300) #let's you see if the parameters are correlated
+
+summary(dry_model_300)
+```
+## Model Comparison - Dry Season
+
+Now we need to compare the models to find which zone fits best. We will use leave one out information criteria (LOOIC)
+```{r Dry_Season_Comparison}
+
+loo_dry_100 <- loo(dry_model_100, moment_match = TRUE, reloo = TRUE) # the lower the LOOIC score then that is the one that we want to use 
+loo_dry_200 <- loo(dry_model_200, moment_match = TRUE) # moment match allows for intermediate posteriors to be compared as well
+loo_dry_300 <- loo(dry_model_300, moment_match = TRUE, reloo = TRUE)
+
+#Compare the three zones together to see which is best 
+
+loo_compare (loo_dry_100, loo_dry_200, loo_dry_300)
+```
+
+## Dry Season Model 100 Plot
+
+This plot was used in Fig 2 which was built in Canva. 
+```{r Dry_Model_Plot}
+
+# STEP 1: Extract posterior draws from your model
+draws <- as_draws_df(dry_model_100) %>%
+  select(starts_with("b_")) %>%
+  pivot_longer(everything(), names_to = "term", values_to = "estimate")
+
+# STEP 2: Annotate behavior, variable, season
+draws <- draws %>%
+  mutate(
+    Behavior = case_when(
+      grepl("mual", term) ~ "Alert",
+      grepl("mufe", term) ~ "Feeding",
+      grepl("mutr", term) ~ "Traveling",
+      TRUE ~ NA_character_
+    ),
+    Variable = case_when(
+      grepl("temp_c", term) ~ "Temperature",
+      grepl("temp_Rh_c", term) ~ "Temp × RH",
+      grepl("Rh_c", term) ~ "Humidity",
+      grepl("time_minutes", term) ~ "Time",
+      TRUE ~ NA_character_
+    ),
+    Season = "Dry Season"
+  ) %>%
+  filter(!is.na(Variable))
+
+# STEP 3: Summarize posterior (mean and 95% CI)
+summary_tbl <- draws %>%
+  group_by(Season, Behavior, Variable) %>%
+  summarise(
+    Estimate = mean(estimate),
+    lower = quantile(estimate, 0.025),
+    upper = quantile(estimate, 0.975),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Credible = case_when(
+      lower > 0 | upper < 0 ~ "Yes",
+      lower * upper < 0 & (abs(lower) > 0.01 | abs(upper) > 0.01) ~ "Almost",
+      TRUE ~ "No"
+    )
+  )
+
+# STEP 4: Plot (table-style w/ horizontal CI bars)
+gt_table <- ggplot(summary_tbl, aes(x = Estimate, y = paste(Season, Behavior, Variable, sep = " | "))) +
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.3, color = "gray30") +
+  geom_point(color = "black", size = 1.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Environmental Effects on Behavior (Dry Season)",
+    x = "Posterior Estimate (95% CI)",
+    y = NULL
+  ) +
+  facet_wrap(~Behavior, scales = "free_y", ncol = 1) +
+  theme_bw(base_size = 14)
+
+ggsave(gt_table, filename = "Environmental_Effects_Dry_100m.png")
+
+```
+
+## Hot Season
+```{r Hot_Season}
+
+# 100m zone
+hot_model_100 <-brm(
+  beh2 ~ temp_c + temp_Rh_c + Rh_c + animal_height.m. + time_minutes + 
+    (1 | zone_id_100) + (1 | id), #these are the random effects 
+  data = hot_data,
+  family = categorical(),
+  chains = 4,  #this is the recommended number from the package handbook  
+  cores = 4,
+  iter = 4000, #for stability
+  control = list(adapt_delta = 0.99), # tighter adaptation (forces the model to be more careful),
+  save_pars = save_pars(all = TRUE) #save all intermediate posterior draws so we can use moment matching later
+)
+
+pairs(hot_model_100) #let's you see if the parameters are correlated
+
+summary(hot_model_100)
+
+#200m zone
+
+hot_model_200 <- brm(
+  beh2 ~ temp_c + temp_Rh_c + Rh_c + animal_height.m. + time_minutes + 
+    (1 | zone_id_200m) + (1 | id), #these are the random effects 
+  data = hot_data,
+  family = categorical(),
+  chains = 4,  #this is the recommended number from the package handbook 
+  cores = 4,
+  iter = 4000, #for stability
+  control = list(adapt_delta = 0.99, max_treedepth = 15), # tighter adaptation (forces the model to be more careful)
+  save_pars = save_pars(all = TRUE)
+)
+
+pairs(hot_model_200) #let's you see if the parameters are correlated
+
+summary(hot_model_200)
+
+#300m zone
+
+hot_model_300 <- brm(
+  beh2 ~ temp_c + temp_Rh_c + Rh_c + animal_height.m. + time_minutes + 
+    (1 | zone_id_300) + (1 | id), #these are the random effects 
+  data = hot_data,
+  family = categorical(),
+  chains = 4,  #this is the recommended number from the package handbook 
+  cores = 4,
+  iter = 4000, #for stability
+  control = list(adapt_delta = 0.99, max_treedepth = 15), # tighter adaptation (forces the model to be more careful)
+  save_pars = save_pars(all = TRUE)
+)
+
+
+summary(hot_model_300)
+```
+## Model Comparison - Hot Season
+```{r Hot_Season_Loo}
+
+loo_hot_100 <- loo(hot_model_100, moment_match = TRUE) # the lower the LOOIC score then that is the one that we want to use 
+loo_hot_200 <- loo(hot_model_200, moment_match = TRUE) # moment match allows for intermediate posteriors to be compared as well
+loo_hot_300 <- loo(hot_model_300, moment_match = TRUE)
+
+#Compare the three zones together to see which is best 
+
+loo_compare (loo_hot_100, loo_hot_200, loo_hot_300)
+```
+## Hot Season Model 100 Plot
+
+This plot was used in Fig 2 which was built in Canva. 
+```{r Hot_Model_100_Plot}
+
+# STEP 1: Extract posterior draws from your model
+draws <- as_draws_df(hot_model_100) %>%
+  select(starts_with("b_")) %>%
+  pivot_longer(everything(), names_to = "term", values_to = "estimate")
+
+# STEP 2: Annotate behavior, variable, season
+draws <- draws %>%
+  mutate(
+    Behavior = case_when(
+      grepl("mual", term) ~ "Alert",
+      grepl("mufe", term) ~ "Feeding",
+      grepl("mutr", term) ~ "Traveling",
+      TRUE ~ NA_character_
+    ),
+    Variable = case_when(
+      grepl("temp_c", term) ~ "Temperature",
+      grepl("temp_Rh_c", term) ~ "Temp × RH",
+      grepl("Rh_c", term) ~ "Humidity",
+      grepl("time_minutes", term) ~ "Time",
+      TRUE ~ NA_character_
+    ),
+    Season = "Hot Season"
+  ) %>%
+  filter(!is.na(Variable))
+
+# STEP 3: Summarize posterior (mean and 95% CI)
+summary_tbl <- draws %>%
+  group_by(Season, Behavior, Variable) %>%
+  summarise(
+    Estimate = mean(estimate),
+    lower = quantile(estimate, 0.025),
+    upper = quantile(estimate, 0.975),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Credible = case_when(
+      lower > 0 | upper < 0 ~ "Yes",
+      lower * upper < 0 & (abs(lower) > 0.01 | abs(upper) > 0.01) ~ "Almost",
+      TRUE ~ "No"
+    )
+  )
+
+# STEP 4: Plot (table-style w/ horizontal CI bars)
+gt_table <- ggplot(summary_tbl, aes(x = Estimate, y = paste(Season, Behavior, Variable, sep = " | "))) +
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.3, color = "gray30") +
+  geom_point(color = "black", size = 1.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Environmental Effects on Behavior (Hot Season)",
+    x = "Posterior Estimate (95% CI)",
+    y = NULL
+  ) +
+  facet_wrap(~Behavior, scales = "free_y", ncol = 1) +
+  theme_bw(base_size = 14)
+
+ggsave(gt_table, filename = "Environmental_Effects_Hot_100m.png")
+
+```
+
+## Wet Season
+```{r Wet_Season}
+
+# 100m zone
+wet_model_100 <- brm(
+  beh2 ~ temp_c + temp_Rh_c + Rh_c + animal_height.m. + time_minutes + 
+    (1 | zoneid_100m) + (1 | id), #these are the random effects 
+  data = wet_data,
+  family = categorical(),
+  chains = 4,  #this is the recommended number from the package handbook 
+  cores = 4,
+  iter = 4000, #for stability
+  control = list(adapt_delta = 0.99), # tighter adaptation (forces the model to be more careful),
+  save_pars = save_pars(all = TRUE) #save all intermediate posterior draws so we can use moment matching later
+)
+
+pairs(wet_model_100) #let's you see if the parameters are correlated
+
+summary(wet_model_100)
+
+#200m zone
+
+wet_model_200 <- brm(
+  beh2 ~ temp_c + temp_Rh_c + Rh_c + animal_height.m. + time_minutes + 
+    (1 | zoneid_200m) + (1 | id), #these are the random effects 
+  data = wet_data,
+  family = categorical(),
+  chains = 4,  #this is the recommended number from the package handbook 
+  cores = 4,
+  iter = 4000, #for stability
+  control = list(adapt_delta = 0.99, max_treedepth = 15), # tighter adaptation (forces the model to be more careful)
+  save_pars = save_pars(all = TRUE)
+)
+
+pairs(wet_model_200) #let's you see if the parameters are correlated
+
+summary(wet_model_200)
+
+#300m zone
+
+wet_model_300 <- brm(
+  beh2 ~ temp_c + temp_Rh_c + Rh_c + animal_height.m. + time_minutes + 
+    (1 | zoneid_300m) + (1 | id), #these are the random effects 
+  data = wet_data,
+  family = categorical(),
+  chains = 4,  #this is the recommended number from the package handbook 
+  cores = 4,
+  iter = 4000, #for stability
+  control = list(adapt_delta = 0.99, max_treedepth = 15), # tighter adaptation (forces the model to be more careful)
+  save_pars = save_pars(all = TRUE)
+)
+
+pairs(wet_model_300) #let's you see if the parameters are correlated
+
+summary(wet_model_300)
+
+```
+## Model Comparison - Wet Season
+```{r Wet_Season_Comparison}
+#Now we need to compare the models to find which zone fits best. We will use leave one out information criteria (LOOIC)
+
+loo_wet_100 <- loo(wet_model_100, moment_match = TRUE) #lower the LOOIC score then that is the one that we want to use 
+loo_wet_200 <- loo(wet_model_200) # moment match allows for intermediate posteriors to be compared as well
+loo_wet_300 <- loo(wet_model_300, moment_match = TRUE)
+
+#Compare the three zones together to see which is best 
+
+loo_compare (loo_wet_100, loo_wet_200, loo_wet_300)
+
+```
+## Wet Season Model 100 Plot
+
+This plot was used in Fig 2 which was built in Canva. 
+```{r Dry_Model_100_Plot}
+
+# STEP 1: Extract posterior draws from your model
+draws <- as_draws_df(wet_model_100) %>%
+  select(starts_with("b_")) %>%
+  pivot_longer(everything(), names_to = "term", values_to = "estimate")
+
+# STEP 2: Annotate behavior, variable, season
+draws <- draws %>%
+  mutate(
+    Behavior = case_when(
+      grepl("mual", term) ~ "Alert",
+      grepl("mufe", term) ~ "Feeding",
+      grepl("mutr", term) ~ "Traveling",
+      TRUE ~ NA_character_
+    ),
+    Variable = case_when(
+      grepl("temp_c", term) ~ "Temperature",
+      grepl("temp_Rh_c", term) ~ "Temp × RH",
+      grepl("Rh_c", term) ~ "Humidity",
+      grepl("time_minutes", term) ~ "Time",
+      TRUE ~ NA_character_
+    ),
+    Season = "Wet Season"
+  ) %>%
+  filter(!is.na(Variable))
+
+# STEP 3: Summarize posterior (mean and 95% CI)
+summary_tbl <- draws %>%
+  group_by(Season, Behavior, Variable) %>%
+  summarise(
+    Estimate = mean(estimate),
+    lower = quantile(estimate, 0.025),
+    upper = quantile(estimate, 0.975),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Credible = case_when(
+      lower > 0 | upper < 0 ~ "Yes",
+      lower * upper < 0 & (abs(lower) > 0.01 | abs(upper) > 0.01) ~ "Almost",
+      TRUE ~ "No"
+    )
+  )
+
+# STEP 4: Plot (table-style w/ horizontal CI bars)
+gt_table <- ggplot(summary_tbl, aes(x = Estimate, y = paste(Season, Behavior, Variable, sep = " | "))) +
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.3, color = "gray30") +
+  geom_point(color = "black", size = 1.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Environmental Effects on Behavior (Wet Season)",
+    x = "Posterior Estimate (95% CI)",
+    y = NULL
+  ) +
+  facet_wrap(~Behavior, scales = "free_y", ncol = 1) +
+  theme_bw(base_size = 14)
+
+ggsave(gt_table, filename = "Environmental_Effects_Wet_100m.png")
+
+```
+
+## Posterior Directional Calculation
+
+After determining which model is the best fit for our data, we used the posterior directional calculation to determine if our non-credible
+Bayesian results might have weak directional evidence (PD > 90% but <95%). In our study we called non-credible results that had directional evidence "almost credible". 
+
+```{r Posterior_Directional_Calculation}
+#Dry season
+pd_result_dry <- pd(dry_model_100)
+print(pd_result_dry)
+
+#Hot season
+pd_result_hot <- pd(hot_model_100)
+print(pd_result_hot)
+
+#Wet season
+pd_result_wet <- pd(wet_model_100)
+print(pd_result_wet)
+
+```
+
