@@ -43,16 +43,16 @@ R ≥ 4.2 recommended
 `brms`, `loo`, `bayestestR`, `posterior`, `bayesplot`,  
 `tidybayes`, `cowplot`, `ggtext`, `tidyr`, `dplyr`
 
-###License
+### License
 
 Code: MIT
 
 Data: CC BY 4.0 
 
-###Citation
+### Citation
 
 Please cite the associated manuscript when using this repository.
 
-###Contact
+### Contact
 
 Maintainer: Keely Maynard — keelymay@buffalo.edu
